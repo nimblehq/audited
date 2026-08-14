@@ -20,6 +20,19 @@ module AuditedSpecHelpers
     end
   end
 
+  # Captures SQL statements touching the audits table executed within the block.
+  def capture_audit_queries
+    queries = []
+    subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+      payload = args.last
+      queries << payload[:sql] if payload[:name] != "SCHEMA" && payload[:sql] =~ /\bFROM\s+["`]?audits["`]?/i
+    end
+    yield
+    queries
+  ensure
+    ActiveSupport::Notifications.unsubscribe(subscriber)
+  end
+
   def run_migrations(direction, migrations_paths, target_version = nil)
     if rails_below?("5.2.0.rc1")
       ActiveRecord::Migrator.send(direction, migrations_paths, target_version)
