@@ -19,7 +19,7 @@ module Audited
     class << self
       def load(obj)
         if text_column?
-          ActiveRecord::Coders::YAMLColumn.new(Object).load(obj)
+          yaml_column.load(obj)
         else
           obj
         end
@@ -27,14 +27,22 @@ module Audited
 
       def dump(obj)
         if text_column?
-          ActiveRecord::Coders::YAMLColumn.new(Object).dump(obj)
+          yaml_column.dump(obj)
         else
           obj
         end
       end
 
       def text_column?
-        Audited.audit_class.columns_hash["audited_changes"].type.to_s == "text"
+        Audited.audit_class.columns_hash["audited_changes"].type == :text
+      end
+
+      private
+
+      # The coder is stateless across calls, so a single instance can be
+      # shared instead of instantiating one per (de)serialization.
+      def yaml_column
+        @yaml_column ||= ActiveRecord::Coders::YAMLColumn.new(Object)
       end
     end
   end

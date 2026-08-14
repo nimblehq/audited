@@ -159,12 +159,14 @@ module Audited
       #   end
       #
       def revisions(from_version = 1)
-        return [] unless audits.from_version(from_version).exists?
+        targeted_audits = audits.from_version(from_version).select([:audited_changes, :version, :action]).to_a
+        return [] if targeted_audits.empty?
 
-        all_audits = audits.select([:audited_changes, :version, :action]).to_a
-        targeted_audits = all_audits.select { |audit| audit.version >= from_version }
-
-        previous_attributes = reconstruct_attributes(all_audits - targeted_audits)
+        previous_attributes = if from_version > 1
+          reconstruct_attributes(audits.to_version(from_version - 1).select([:audited_changes, :version, :action]))
+        else
+          {}
+        end
 
         targeted_audits.map do |audit|
           previous_attributes.merge!(audit.new_attributes)
@@ -175,7 +177,7 @@ module Audited
       # Get a specific revision specified by the version number, or +:previous+
       # Returns nil for versions greater than revisions count
       def revision(version)
-        if version == :previous || audits.last.version >= version
+        if version == :previous || (audits.maximum(:version) || 0) >= version
           revision_with Audited.audit_class.reconstruct_attributes(audits_to(version))
         end
       end
@@ -230,18 +232,6 @@ module Audited
           revision.send :instance_variable_set, "@_destroyed", false
           revision.send :instance_variable_set, "@marked_for_destruction", false
           Audited.audit_class.assign_revision_attributes(revision, attributes)
-
-          # Remove any association proxies so that they will be recreated
-          # and reference the correct object for this revision. The only way
-          # to determine if an instance variable is a proxy object is to
-          # see if it responds to certain methods, as it forwards almost
-          # everything to its target.
-          revision.instance_variables.each do |ivar|
-            proxy = revision.instance_variable_get ivar
-            if !proxy.nil? && proxy.respond_to?(:proxy_respond_to?)
-              revision.instance_variable_set ivar, nil
-            end
-          end
         end
       end
 
@@ -267,16 +257,24 @@ module Audited
 
         filtered_changes = normalize_enum_changes(filtered_changes)
 
-        if for_touch && (last_audit = audits.last&.audited_changes)
+        if for_touch && (last_audit = latest_audit&.audited_changes)
           filtered_changes.reject! do |k, v|
-            last_audit[k].to_json == v.to_json ||
-            last_audit[k].to_json == v[1].to_json
+            last_json = last_audit[k].to_json
+            last_json == v.to_json || last_json == v[1].to_json
           end
         end
 
         filtered_changes = redact_values(filtered_changes)
         filtered_changes = filter_encrypted_attrs(filtered_changes)
         filtered_changes.to_hash
+      end
+
+      # On an unloaded association, CollectionProxy#last scans every record
+      # accumulated in the association target (each audited save appends one),
+      # deserializing each audit's YAML — O(audit count) per call. A relation
+      # query fetches the newest audit in constant time instead.
+      def latest_audit
+        audits.loaded? ? audits.last : audits.descending.first
       end
 
       def normalize_enum_changes(changes)
@@ -298,17 +296,21 @@ module Audited
       end
 
       def redact_values(filtered_changes)
+        return filtered_changes if audited_options[:redacted].blank?
+
         filter_attr_values(
           audited_changes: filtered_changes,
-          attrs: Array(audited_options[:redacted]).map(&:to_s),
+          attrs: audited_options[:redacted],
           placeholder: audited_options[:redaction_value] || REDACTED
         )
       end
 
       def filter_encrypted_attrs(filtered_changes)
+        return filtered_changes unless respond_to?(:encrypted_attributes) && encrypted_attributes.present?
+
         filter_attr_values(
           audited_changes: filtered_changes,
-          attrs: respond_to?(:encrypted_attributes) ? Array(encrypted_attributes).map(&:to_s) : []
+          attrs: encrypted_attributes.map(&:to_s)
         )
       end
 
@@ -516,7 +518,7 @@ module Audited
       end
 
       def auditing_enabled=(val)
-        Audited.store["#{table_name}_auditing_enabled"] = val
+        Audited.store[auditing_enabled_store_key] = val
       end
 
       def default_ignored_attributes
@@ -530,6 +532,7 @@ module Audited
         audited_options[:on] = ([:create, :update, :touch, :destroy] - Audited.ignored_default_callbacks) if audited_options[:on].empty?
         audited_options[:only] = Array.wrap(audited_options[:only]).map(&:to_s)
         audited_options[:except] = Array.wrap(audited_options[:except]).map(&:to_s)
+        audited_options[:redacted] = Array.wrap(audited_options[:redacted]).map(&:to_s)
         audited_options[:max_audits] ||= Audited.max_audits
       end
 
@@ -544,7 +547,11 @@ module Audited
       end
 
       def class_auditing_enabled
-        Audited.store.fetch("#{table_name}_auditing_enabled", true)
+        Audited.store.fetch(auditing_enabled_store_key, true)
+      end
+
+      def auditing_enabled_store_key
+        @auditing_enabled_store_key ||= "#{table_name}_auditing_enabled"
       end
 
       def reset_audited_columns

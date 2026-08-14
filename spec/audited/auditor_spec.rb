@@ -1,9 +1,8 @@
 require "spec_helper"
 
-# not testing proxy_respond_to? hack / 2 methods / deprecation of `version`
-# also, an additional 6 around `after_touch` for Versions before 6.
-# Increased to 17/10 to get to green CI as a new baseline, August 2024.
-uncovered = (ActiveRecord::VERSION::MAJOR < 6) ? 17 : 10
+# not testing 2 methods / deprecation of `version`
+# also, additional lines around `after_touch` for Versions before 6.
+uncovered = (ActiveRecord::VERSION::MAJOR < 6) ? 15 : 7
 SingleCov.covered! uncovered: uncovered
 
 class ConditionalPrivateCompany < ::ActiveRecord::Base
@@ -500,6 +499,25 @@ describe Audited::Auditor do
         }.to_not change(Audited::Audit, :count)
       end
 
+      it "should fetch the latest audit with a limited query instead of loading the association" do
+        full_row_selects = capture_audit_queries { @user.touch(:suspended_at) }
+          .grep(/\ASELECT\s+["`]?audits["`]?\.\*/i)
+
+        expect(full_row_selects.size).to eq(1)
+        expect(full_row_selects.first).to match(/LIMIT/i)
+        expect(@user.audits).to_not be_loaded
+      end
+
+      it "should use the loaded audits association without querying when already loaded" do
+        @user.audits.load
+
+        full_row_selects = capture_audit_queries { @user.touch(:suspended_at) }
+          .grep(/\ASELECT\s+["`]?audits["`]?\.\*/i)
+
+        expect(full_row_selects).to be_empty
+        expect(@user.audits.last.action).to eq("update")
+      end
+
       it "should store an audit if touch is the only audit" do
         on_touch = Models::ActiveRecord::OnTouchOnly.create(name: "Bart")
         expect {
@@ -788,6 +806,18 @@ describe Audited::Auditor do
       expect(user.revisions).to be_empty
     end
 
+    it "should load all revisions with a single audits query" do
+      u = create_versions(3)
+      selects = capture_audit_queries { u.revisions }.grep(/\ASELECT/i)
+      expect(selects.size).to eq(1)
+    end
+
+    it "should load partial revisions with two audits queries" do
+      u = create_versions(3)
+      selects = capture_audit_queries { u.revisions(2) }.grep(/\ASELECT/i)
+      expect(selects.size).to eq(2)
+    end
+
     it "should ignore attributes that have been deleted" do
       user.audits.last.update! audited_changes: {old_attribute: "old value"}
       expect { user.revisions }.to_not raise_error
@@ -891,6 +921,11 @@ describe Audited::Auditor do
 
     it "should return nil for values greater than the number of revisions" do
       expect(user.revision(user.revisions.count + 1)).to be_nil
+    end
+
+    it "should return nil for a record without audits" do
+      u = Models::ActiveRecord::User.without_auditing { Models::ActiveRecord::User.create!(name: "No Audits") }
+      expect(u.revision(1)).to be_nil
     end
 
     it "should work with array attributes" do
