@@ -1,5 +1,10 @@
 # Audited ChangeLog
 
+### 5.9.0 (2026-08-15)
+
+- Optimize hot paths: constant-time touch auditing, fewer queries and allocations
+  [#1](https://github.com/nimblehq/audited/pull/1)
+
 ### 5.8.0 (2024-11-08)
 - Allow calling audited multiple times - @mohammednasser-32
   [734](https://github.com/collectiveidea/audited/pull/734)  
